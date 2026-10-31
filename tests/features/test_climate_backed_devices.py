@@ -1390,6 +1390,22 @@ async def test_empty_readings_do_not_feed_the_stale_watchdog(
 
 
 @pytest.mark.parametrize("expected_lingering_timers", [True])
+async def test_unchanged_child_writes_do_not_feed_the_stale_watchdog(
+    hass: HomeAssistant, freezer
+) -> None:
+    """A climate source's unchanged state reports are not readings."""
+    child = await _stale_heating_child(hass, freezer)
+
+    for _ in range(3):
+        freezer.tick(timedelta(minutes=1))
+        child.async_write_ha_state()  # state reported, nothing changed
+        common.async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+
+    assert hass.states.get(AC).state == HVACMode.OFF
+
+
+@pytest.mark.parametrize("expected_lingering_timers", [True])
 async def test_our_own_echo_does_not_recover_a_stalled_child(
     hass: HomeAssistant, freezer
 ) -> None:

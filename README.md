@@ -900,7 +900,9 @@ The reason is grouped into three categories:
 
 ### sensor_stale_duration
 
-  _(optional) (timedelta)_  Set a delay for the target sensor to be considered not stalled. If the sensor is not available for the specified time or doesn't get updated the thermostat will be turned off.
+  _(optional) (timedelta)_  Set a delay for the target sensor to be considered not stalled. If the sensor doesn't report for the specified time the thermostat will be turned off. A report of an unchanged reading counts. If the sensor becomes `unavailable` or `unknown` the thermostat is turned off at once. Control resumes when the sensor reports a reading again.
+
+  Some integrations, such as passive Bluetooth sensors (BTHome, Xiaomi BLE), only write a reading when it changes, so a steady temperature looks like a sensor that stopped reporting. These sensors turn `unavailable` by themselves when they stop transmitting, so set the delay longer than the longest steady spell you expect.
 
   _requires: `target_sensor` and/or `huidity_sensor`_
 

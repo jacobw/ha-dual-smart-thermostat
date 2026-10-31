@@ -962,11 +962,13 @@ async def test_sensor_unknown_secure_heater_off_outside_stale_duration(
     )
     await hass.async_block_till_done()
 
-    assert len(calls) == 1
-    call = calls[0]
-    assert call.domain == HASS_DOMAIN
-    assert call.service == SERVICE_TURN_OFF
-    assert call.data["entity_id"] == common.ENT_SWITCH
+    # Unavailable stops at once and the timer repeats it: the mock switch never
+    # turns off. What matters is that it was only ever turned off.
+    assert calls
+    for call in calls:
+        assert call.domain == HASS_DOMAIN
+        assert call.service == SERVICE_TURN_OFF
+        assert call.data["entity_id"] == common.ENT_SWITCH
 
     # Turns back on if sensor is restored
     calls = setup_switch(hass, False)
@@ -1056,6 +1058,127 @@ async def test_sensor_restores_after_state_changes(
         hass.states.get(common.ENTITY).attributes.get(ATTR_HVAC_ACTION_REASON)
         == HVACActionReason.NONE
     )
+
+
+@pytest.mark.parametrize("expected_lingering_timers", [True])
+async def test_sensor_unchanged_report_keeps_stale_timer_alive(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    setup_comp_heat_safety_delay,  # noqa: F811
+) -> None:
+    """Test a sensor reporting the same reading again is not stalled."""
+    # Given
+    setup_sensor(hass, 28)
+    await common.async_set_temperature(hass, 30)
+    calls = setup_switch(hass, True)
+    await hass.async_block_till_done()
+
+    # When
+    # The same reading arrives every minute, for longer than the stale delay
+    for _ in range(3):
+        freezer.tick(timedelta(minutes=1))
+        common.async_fire_time_changed(hass)
+        await hass.async_block_till_done()
+        setup_sensor(hass, 28)
+        await hass.async_block_till_done()
+
+    # Then
+    assert len(calls) == 0
+    assert (
+        hass.states.get(common.ENTITY).attributes.get(ATTR_HVAC_ACTION_REASON)
+        != HVACActionReasonInternal.TEMPERATURE_SENSOR_STALLED
+    )
+
+
+@pytest.mark.parametrize("expected_lingering_timers", [True])
+async def test_sensor_unchanged_report_recovers_from_stall(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    setup_comp_heat_safety_delay,  # noqa: F811
+) -> None:
+    """Test an unchanged reading after a stall resumes control."""
+    # Given
+    setup_sensor(hass, 27)
+    await common.async_set_temperature(hass, 30)
+    calls = setup_switch(hass, True)
+    await hass.async_block_till_done()
+    freezer.tick(timedelta(minutes=3))
+    common.async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert (
+        hass.states.get(common.ENTITY).attributes.get(ATTR_HVAC_ACTION_REASON)
+        == HVACActionReasonInternal.TEMPERATURE_SENSOR_STALLED
+    )
+
+    # When
+    calls = setup_switch(hass, False)
+    setup_sensor(hass, 27)
+    await hass.async_block_till_done()
+
+    # Then
+    assert len(calls) == 1
+    call = calls[0]
+    assert call.domain == HASS_DOMAIN
+    assert call.service == SERVICE_TURN_ON
+    assert call.data["entity_id"] == common.ENT_SWITCH
+
+
+@pytest.mark.parametrize("sensor_state", [STATE_UNAVAILABLE, STATE_UNKNOWN])
+@pytest.mark.parametrize("expected_lingering_timers", [True])
+async def test_sensor_unavailable_secure_heater_off_at_once(
+    hass: HomeAssistant, sensor_state, setup_comp_heat_safety_delay  # noqa: F811
+) -> None:
+    """Test a sensor going unavailable turns the heater off without waiting."""
+    # Given
+    setup_sensor(hass, 28)
+    await common.async_set_temperature(hass, 30)
+    calls = setup_switch(hass, True)
+    await hass.async_block_till_done()
+
+    # When
+    hass.states.async_set(common.ENT_SENSOR, sensor_state)
+    await hass.async_block_till_done()
+
+    # Then
+    assert len(calls) == 1
+    call = calls[0]
+    assert call.domain == HASS_DOMAIN
+    assert call.service == SERVICE_TURN_OFF
+    assert call.data["entity_id"] == common.ENT_SWITCH
+    assert (
+        hass.states.get(common.ENTITY).attributes.get(ATTR_HVAC_ACTION_REASON)
+        == HVACActionReasonInternal.TEMPERATURE_SENSOR_STALLED
+    )
+
+    # Turns back on if sensor is restored
+    calls = setup_switch(hass, False)
+    setup_sensor(hass, 19)
+    await hass.async_block_till_done()
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call.domain == HASS_DOMAIN
+    assert call.service == SERVICE_TURN_ON
+    assert call.data["entity_id"] == common.ENT_SWITCH
+
+
+@pytest.mark.parametrize("sensor_state", [STATE_UNAVAILABLE, STATE_UNKNOWN])
+async def test_sensor_unavailable_ignored_without_stale_duration(
+    hass: HomeAssistant, sensor_state, setup_comp_heat  # noqa: F811
+) -> None:
+    """Test an unavailable sensor changes nothing when no stale delay is set."""
+    # Given
+    setup_sensor(hass, 28)
+    await common.async_set_temperature(hass, 30)
+    calls = setup_switch(hass, True)
+    await hass.async_block_till_done()
+
+    # When
+    hass.states.async_set(common.ENT_SENSOR, sensor_state)
+    await hass.async_block_till_done()
+
+    # Then
+    assert len(calls) == 0
 
 
 async def test_running_when_hvac_mode_is_off(

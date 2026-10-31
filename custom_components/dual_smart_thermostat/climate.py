@@ -17,6 +17,7 @@ from homeassistant.components.climate.const import (
     ATTR_HVAC_MODE,
     ATTR_TARGET_TEMP_HIGH,
     ATTR_TARGET_TEMP_LOW,
+    DOMAIN as CLIMATE_DOMAIN,
     PRESET_NONE,
 )
 from homeassistant.components.humidifier import ATTR_HUMIDITY
@@ -41,10 +42,12 @@ from homeassistant.core import (
     CoreState,
     Event,
     EventStateChangedData,
+    EventStateReportedData,
     HomeAssistant,
     ServiceCall,
     State,
     callback,
+    split_entity_id,
 )
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import discovery
@@ -54,6 +57,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_state_change_event,
+    async_track_state_report_event,
     async_track_time_interval,
 )
 from homeassistant.helpers.reload import async_setup_reload_service
@@ -814,6 +818,19 @@ class DualSmartThermostat(ClimateEntity, RestoreEntity):
                 self.hass, [self.sensor_entity_id], self._async_sensor_changed_event
             )
         )
+        if (
+            self._sensor_stale_duration
+            and split_entity_id(self.sensor_entity_id)[0] != CLIMATE_DOMAIN
+        ):
+            # An unchanged reading fires no state change, only a state report.
+            # A climate source is left out: it reports our own commands too.
+            self.async_on_remove(
+                async_track_state_report_event(
+                    self.hass,
+                    [self.sensor_entity_id],
+                    self._async_sensor_reported_event,
+                )
+            )
 
         switch_entities = self.hvac_device.get_device_ids()
         if switch_entities:
@@ -1495,6 +1512,10 @@ class DualSmartThermostat(ClimateEntity, RestoreEntity):
             "Sensor change: %s, trigger_control: %s", new_state, trigger_control
         )
         if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            if new_state is not None and self._sensor_stale_duration:
+                # The integration has already decided the sensor is gone:
+                # stop now rather than when the stale timer runs out.
+                await self._async_sensor_not_responding()
             return
 
         if self._sensor_stale_duration:
@@ -1516,18 +1537,40 @@ class DualSmartThermostat(ClimateEntity, RestoreEntity):
                 self._hvac_action_reason = self.hvac_device.HVACActionReason
                 self._publish_hvac_action_reason(self._hvac_action_reason)
                 self.async_write_ha_state()
-            if self._remove_stale_tracking:
-                self._remove_stale_tracking()
-            self._remove_stale_tracking = async_track_time_interval(
-                self.hass,
-                self._async_sensor_not_responding,
-                self._sensor_stale_duration,
-            )
+            self._async_restart_stale_tracking()
 
         self.environment.update_temp_from_state(new_state)
         if trigger_control:
             await self._async_control_climate()
         self.async_write_ha_state()
+
+    async def _async_sensor_reported_event(
+        self, event: Event[EventStateReportedData]
+    ) -> None:
+        """Handle the sensor reporting an unchanged reading.
+
+        The sensor is alive, so the stale timer starts again; a stalled
+        thermostat recovers as it would on a changed reading.
+        """
+        new_state = event.data["new_state"]
+        if new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return
+        if self._sensor_stalled:
+            trigger_control = self.hvac_device.hvac_mode != HVACMode.OFF
+            await self._async_sensor_changed(new_state, trigger_control)
+            return
+        self._async_restart_stale_tracking()
+
+    @callback
+    def _async_restart_stale_tracking(self) -> None:
+        """Start the stale timer again from now."""
+        if self._remove_stale_tracking:
+            self._remove_stale_tracking()
+        self._remove_stale_tracking = async_track_time_interval(
+            self.hass,
+            self._async_sensor_not_responding,
+            self._sensor_stale_duration,
+        )
 
     async def _async_sensor_not_responding(self, now: datetime | None = None) -> None:
         """Handle sensor stale event."""
